@@ -1,0 +1,256 @@
+version: "3.9"
+
+networks:
+  data-kata-net:
+    driver: bridge
+
+volumes:
+  source_db_data:
+  output_db_data:
+  kafka_data:
+  grafana_data:
+  marquez_data:
+
+services:
+
+  # ─────────────────────────────────────────────
+  # SOURCE DATABASE (PostgreSQL)
+  # ─────────────────────────────────────────────
+  source-db:
+    image: postgres:15
+    container_name: source-db
+    environment:
+      POSTGRES_DB: sales_source
+      POSTGRES_USER: sales_user
+      POSTGRES_PASSWORD: sales_pass
+    volumes:
+      - source_db_data:/var/lib/postgresql/data
+      - ./sources/relational/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5433:5432"
+    networks:
+      - data-kata-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sales_user -d sales_source"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # OUTPUT DATABASE (PostgreSQL - Results)
+  # ─────────────────────────────────────────────
+  output-db:
+    image: postgres:15
+    container_name: output-db
+    environment:
+      POSTGRES_DB: sales_results
+      POSTGRES_USER: results_user
+      POSTGRES_PASSWORD: results_pass
+    volumes:
+      - output_db_data:/var/lib/postgresql/data
+      - ./output_db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5434:5432"
+    networks:
+      - data-kata-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U results_user -d sales_results"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # ZOOKEEPER
+  # ─────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - data-kata-net
+
+  # ─────────────────────────────────────────────
+  # KAFKA
+  # ─────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "29092:29092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - data-kata-net
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ─────────────────────────────────────────────
+  # KAFKA CONNECT (Debezium CDC)
+  # ─────────────────────────────────────────────
+  kafka-connect:
+    image: debezium/connect:2.6
+    container_name: kafka-connect
+    depends_on:
+      kafka:
+        condition: service_healthy
+      source-db:
+        condition: service_healthy
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: debezium-group
+      CONFIG_STORAGE_TOPIC: debezium_configs
+      OFFSET_STORAGE_TOPIC: debezium_offsets
+      STATUS_STORAGE_TOPIC: debezium_status
+    ports:
+      - "8083:8083"
+    networks:
+      - data-kata-net
+
+  # ─────────────────────────────────────────────
+  # SPARK MASTER
+  # ─────────────────────────────────────────────
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: spark-master
+    environment:
+      SPARK_MODE: master
+      SPARK_MASTER_HOST: spark-master
+    ports:
+      - "8090:8080"
+      - "7077:7077"
+    networks:
+      - data-kata-net
+    volumes:
+      - ./processing:/opt/spark-apps/processing
+      - ./lineage:/opt/spark-apps/lineage
+      - ./sources/filesystem/data:/opt/spark-apps/data
+      - ./checkpoints:/opt/spark-apps/checkpoints
+
+  # ─────────────────────────────────────────────
+  # SPARK WORKER
+  # ─────────────────────────────────────────────
+  spark-worker:
+    image: bitnami/spark:3.5
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_WORKER_CORES: 2
+    networks:
+      - data-kata-net
+    volumes:
+      - ./processing:/opt/spark-apps/processing
+      - ./sources/filesystem/data:/opt/spark-apps/data
+      - ./checkpoints:/opt/spark-apps/checkpoints
+
+  # ─────────────────────────────────────────────
+  # SOAP SERVER (Mock WS-* product catalog)
+  # ─────────────────────────────────────────────
+  soap-server:
+    build:
+      context: ./sources/soap_ws
+      dockerfile: Dockerfile
+    container_name: soap-server
+    ports:
+      - "8001:8001"
+    networks:
+      - data-kata-net
+
+  # ─────────────────────────────────────────────
+  # MARQUEZ (Data Lineage)
+  # ─────────────────────────────────────────────
+  marquez:
+    image: marquezproject/marquez:0.44.0
+    container_name: marquez
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+    networks:
+      - data-kata-net
+
+  marquez-web:
+    image: marquezproject/marquez-web:0.44.0
+    container_name: marquez-web
+    environment:
+      MARQUEZ_HOST: marquez
+      MARQUEZ_PORT: 5000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - marquez
+    networks:
+      - data-kata-net
+
+  # ─────────────────────────────────────────────
+  # PROMETHEUS
+  # ─────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - data-kata-net
+
+  # ─────────────────────────────────────────────
+  # GRAFANA
+  # ─────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.3.0
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./observability/grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - data-kata-net
+
+  # ─────────────────────────────────────────────
+  # FASTAPI (Results API)
+  # ─────────────────────────────────────────────
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: results-api
+    depends_on:
+      output-db:
+        condition: service_healthy
+    environment:
+      OUTPUT_DB_HOST: output-db
+      OUTPUT_DB_PORT: 5432
+      OUTPUT_DB_NAME: sales_results
+      OUTPUT_DB_USER: results_user
+      OUTPUT_DB_PASSWORD: results_pass
+    ports:
+      - "8080:8080"
+    networks:
+      - data-kata-net
