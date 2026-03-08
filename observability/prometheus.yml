@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: "results-api"
+    static_configs:
+      - targets: ["api:8080"]
+    metrics_path: /metrics
+
+  - job_name: "kafka"
+    static_configs:
+      - targets: ["kafka:9092"]
+
+  - job_name: "spark-master"
+    static_configs:
+      - targets: ["spark-master:8080"]
+    metrics_path: /metrics/prometheus
+
+  - job_name: "source-db"
+    static_configs:
+      - targets: ["source-db-exporter:9187"]
+
+  - job_name: "output-db"
+    static_configs:
+      - targets: ["output-db-exporter:9187"]

@@ -1,0 +1,69 @@
+{
+  "title": "Data Kata - Pipeline Overview",
+  "uid": "data-kata-overview",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "API Requests per Second",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(http_requests_total[1m])",
+          "legendFormat": "{{method}} {{endpoint}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "API Response Time (p95)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95 latency"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Kafka Messages Published",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 8, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(kafka_producer_record_send_total)",
+          "legendFormat": "Total Messages"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Pipeline Runs",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 8, "w": 8, "h": 4 },
+      "targets": [
+        {
+          "expr": "pipeline_runs_total",
+          "legendFormat": "{{pipeline}} {{status}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Top Sales per City - Last Run",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "top_sales_city_amount",
+          "legendFormat": "{{city}} ({{state}})"
+        }
+      ]
+    }
+  ]
+}
