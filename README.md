@@ -23,7 +23,7 @@ Build a **Modern Data Pipeline** that satisfies:
 | 6 | Aggregated results in a dedicated DB + API | PostgreSQL (output) + FastAPI |
 | 7 | Restrictions: **Python only**, no RedShift, no Hadoop | 100% Python, Spark replaces Hadoop, PostgreSQL replaces Redshift |
 
-**Dataset period:** March 3–9, 2026 (7 days of retroactive sales data across 20 salesmen and 19 Brazilian cities)
+**Dataset:** 7 days of sales data across 20 salesmen and 19 Brazilian cities
 
 ---
 
@@ -227,8 +227,4 @@ kafka.sales.filesystem ──┼─► pipeline_top_salesman ─► postgres.top
 kafka.catalog.salesmen ──┘
 ```
 
----
 
-## Dataset Period
-
-All seed data and file exports cover **March 3–9, 2026** (Mon–Sun), including weekend volume variation.
