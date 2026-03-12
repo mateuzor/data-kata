@@ -11,17 +11,23 @@ volumes:
   grafana_data:
   marquez_data:
 
+# ── Shared JAR mount for all Scala-based services ─────────────────────────────
+x-jar: &jar
+  volumes:
+    - ./target/scala-2.12/data-kata-assembly.jar:/app/data-kata.jar
+    - ./sources/filesystem/data:/opt/spark-apps/data
+
 services:
 
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   # SOURCE DATABASE (PostgreSQL)
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   source-db:
     image: postgres:15
     container_name: source-db
     environment:
-      POSTGRES_DB: sales_source
-      POSTGRES_USER: sales_user
+      POSTGRES_DB:       sales_source
+      POSTGRES_USER:     sales_user
       POSTGRES_PASSWORD: sales_pass
     volumes:
       - source_db_data:/var/lib/postgresql/data
@@ -36,15 +42,15 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─────────────────────────────────────────────
-  # OUTPUT DATABASE (PostgreSQL - Results)
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
+  # OUTPUT DATABASE (PostgreSQL — aggregated results)
+  # ──────────────────────────────────────────────────────────────────────────
   output-db:
     image: postgres:15
     container_name: output-db
     environment:
-      POSTGRES_DB: sales_results
-      POSTGRES_USER: results_user
+      POSTGRES_DB:       sales_results
+      POSTGRES_USER:     results_user
       POSTGRES_PASSWORD: results_pass
     volumes:
       - output_db_data:/var/lib/postgresql/data
@@ -59,9 +65,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   # ZOOKEEPER
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.0
     container_name: zookeeper
@@ -71,9 +77,9 @@ services:
     networks:
       - data-kata-net
 
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   # KAFKA
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.6.0
     container_name: kafka
@@ -99,9 +105,9 @@ services:
       timeout: 10s
       retries: 10
 
-  # ─────────────────────────────────────────────
-  # KAFKA CONNECT (Debezium CDC)
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
+  # KAFKA CONNECT — Debezium CDC
+  # ──────────────────────────────────────────────────────────────────────────
   kafka-connect:
     image: debezium/connect:2.6
     container_name: kafka-connect
@@ -111,24 +117,41 @@ services:
       source-db:
         condition: service_healthy
     environment:
-      BOOTSTRAP_SERVERS: kafka:9092
-      GROUP_ID: debezium-group
-      CONFIG_STORAGE_TOPIC: debezium_configs
-      OFFSET_STORAGE_TOPIC: debezium_offsets
-      STATUS_STORAGE_TOPIC: debezium_status
+      BOOTSTRAP_SERVERS:     kafka:9092
+      GROUP_ID:              debezium-group
+      CONFIG_STORAGE_TOPIC:  debezium_configs
+      OFFSET_STORAGE_TOPIC:  debezium_offsets
+      STATUS_STORAGE_TOPIC:  debezium_status
     ports:
       - "8083:8083"
     networks:
       - data-kata-net
 
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
+  # SOAP SERVER — WS-* catalog service (Scala)
+  # ──────────────────────────────────────────────────────────────────────────
+  soap-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: soap-server
+    <<: *jar
+    command: ["com.datakata.soap.SoapServer"]
+    environment:
+      SOAP_WS_PORT: "8001"
+    ports:
+      - "8001:8001"
+    networks:
+      - data-kata-net
+
+  # ──────────────────────────────────────────────────────────────────────────
   # SPARK MASTER
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   spark-master:
     image: bitnami/spark:3.5
     container_name: spark-master
     environment:
-      SPARK_MODE: master
+      SPARK_MODE:        master
       SPARK_MASTER_HOST: spark-master
     ports:
       - "8090:8080"
@@ -136,47 +159,200 @@ services:
     networks:
       - data-kata-net
     volumes:
-      - ./processing:/opt/spark-apps/processing
-      - ./lineage:/opt/spark-apps/lineage
-      - ./sources/filesystem/data:/opt/spark-apps/data
       - ./checkpoints:/opt/spark-apps/checkpoints
+      - ./sources/filesystem/data:/opt/spark-apps/data
+      - ./target/scala-2.12/data-kata-assembly.jar:/opt/spark-apps/data-kata.jar
 
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   # SPARK WORKER
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   spark-worker:
     image: bitnami/spark:3.5
     container_name: spark-worker
     depends_on:
       - spark-master
     environment:
-      SPARK_MODE: worker
-      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_MODE:        worker
+      SPARK_MASTER_URL:  spark://spark-master:7077
       SPARK_WORKER_MEMORY: 2G
-      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_CORES:  2
     networks:
       - data-kata-net
     volumes:
-      - ./processing:/opt/spark-apps/processing
-      - ./sources/filesystem/data:/opt/spark-apps/data
       - ./checkpoints:/opt/spark-apps/checkpoints
+      - ./sources/filesystem/data:/opt/spark-apps/data
+      - ./target/scala-2.12/data-kata-assembly.jar:/opt/spark-apps/data-kata.jar
 
-  # ─────────────────────────────────────────────
-  # SOAP SERVER (Mock WS-* product catalog)
-  # ─────────────────────────────────────────────
-  soap-server:
-    build:
-      context: ./sources/soap_ws
-      dockerfile: Dockerfile
-    container_name: soap-server
-    ports:
-      - "8001:8001"
+  # ──────────────────────────────────────────────────────────────────────────
+  # DATA GENERATION — generates filesystem CSV/Parquet files (one-shot)
+  # ──────────────────────────────────────────────────────────────────────────
+  generate-files:
+    image: bitnami/spark:3.5
+    container_name: generate-files
+    volumes:
+      - ./sources/filesystem/data:/opt/spark-apps/data
+      - ./target/scala-2.12/data-kata-assembly.jar:/opt/spark-apps/data-kata.jar
+    environment:
+      FS_DATA_DIR: /opt/spark-apps/data
+    command: >
+      spark-submit
+        --master local[*]
+        --class com.datakata.datagen.GenerateFiles
+        /opt/spark-apps/data-kata.jar
     networks:
       - data-kata-net
 
-  # ─────────────────────────────────────────────
-  # MARQUEZ (Data Lineage)
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
+  # INGESTION — Relational DB → Kafka (one-shot)
+  # ──────────────────────────────────────────────────────────────────────────
+  ingest-relational:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ingest-relational
+    <<: *jar
+    command: ["com.datakata.ingest.RelationalDBProducer"]
+    environment:
+      SOURCE_DB_URL:          jdbc:postgresql://source-db:5432/sales_source
+      SOURCE_DB_USER:         sales_user
+      SOURCE_DB_PASSWORD:     sales_pass
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATA_START_DATE:        "2026-03-03"
+      DATA_END_DATE:          "2026-03-09"
+    depends_on:
+      source-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - data-kata-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # INGESTION — Filesystem CSV → Kafka (one-shot)
+  # ──────────────────────────────────────────────────────────────────────────
+  ingest-filesystem:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ingest-filesystem
+    <<: *jar
+    command: ["com.datakata.ingest.FileSystemProducer"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      FS_DATA_DIR:             /opt/spark-apps/data
+      DATA_START_DATE:         "2026-03-03"
+      DATA_END_DATE:           "2026-03-09"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - data-kata-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # INGESTION — SOAP WS-* catalog → Kafka (one-shot)
+  # ──────────────────────────────────────────────────────────────────────────
+  ingest-soap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ingest-soap
+    <<: *jar
+    command: ["com.datakata.ingest.SoapIngestionProducer"]
+    environment:
+      SOAP_WS_URL:             http://soap-server:8001
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      - soap-server
+      kafka:
+        condition: service_healthy
+    networks:
+      - data-kata-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # SPARK PIPELINE A — Top Sales per City (Scala)
+  # ──────────────────────────────────────────────────────────────────────────
+  spark-pipeline-city:
+    image: bitnami/spark:3.5
+    container_name: spark-pipeline-city
+    depends_on:
+      - spark-master
+      - spark-worker
+    environment:
+      OUTPUT_DB_URL:          jdbc:postgresql://output-db:5432/sales_results
+      OUTPUT_DB_USER:         results_user
+      OUTPUT_DB_PASSWORD:     results_pass
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OPENLINEAGE_URL:        http://marquez:5000
+      OPENLINEAGE_NAMESPACE:  data-kata
+      DATA_START_DATE:        "2026-03-03"
+      DATA_END_DATE:          "2026-03-09"
+    command: >
+      spark-submit
+        --master spark://spark-master:7077
+        --class com.datakata.jobs.TopSalesCityJob
+        --conf spark.driver.extraJavaOptions="-Dlogback.configurationFile=/opt/spark-apps/data-kata.jar!/logback.xml"
+        /opt/spark-apps/data-kata.jar
+    volumes:
+      - ./checkpoints:/opt/spark-apps/checkpoints
+      - ./target/scala-2.12/data-kata-assembly.jar:/opt/spark-apps/data-kata.jar
+    networks:
+      - data-kata-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # SPARK PIPELINE B — Top Salesman (Scala)
+  # ──────────────────────────────────────────────────────────────────────────
+  spark-pipeline-salesman:
+    image: bitnami/spark:3.5
+    container_name: spark-pipeline-salesman
+    depends_on:
+      - spark-master
+      - spark-worker
+    environment:
+      OUTPUT_DB_URL:          jdbc:postgresql://output-db:5432/sales_results
+      OUTPUT_DB_USER:         results_user
+      OUTPUT_DB_PASSWORD:     results_pass
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      OPENLINEAGE_URL:        http://marquez:5000
+      OPENLINEAGE_NAMESPACE:  data-kata
+      DATA_START_DATE:        "2026-03-03"
+      DATA_END_DATE:          "2026-03-09"
+    command: >
+      spark-submit
+        --master spark://spark-master:7077
+        --class com.datakata.jobs.TopSalesmanJob
+        /opt/spark-apps/data-kata.jar
+    volumes:
+      - ./checkpoints:/opt/spark-apps/checkpoints
+      - ./target/scala-2.12/data-kata-assembly.jar:/opt/spark-apps/data-kata.jar
+    networks:
+      - data-kata-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # RESULTS API (Scala)
+  # ──────────────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: results-api
+    <<: *jar
+    command: ["com.datakata.api.ApiServer"]
+    depends_on:
+      output-db:
+        condition: service_healthy
+    environment:
+      OUTPUT_DB_URL:      jdbc:postgresql://output-db:5432/sales_results
+      OUTPUT_DB_USER:     results_user
+      OUTPUT_DB_PASSWORD: results_pass
+      API_PORT:           "8080"
+    ports:
+      - "8080:8080"
+    networks:
+      - data-kata-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # MARQUEZ — Data Lineage
+  # ──────────────────────────────────────────────────────────────────────────
   marquez:
     image: marquezproject/marquez:0.44.0
     container_name: marquez
@@ -199,9 +375,9 @@ services:
     networks:
       - data-kata-net
 
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   # PROMETHEUS
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.50.0
     container_name: prometheus
@@ -212,16 +388,16 @@ services:
     networks:
       - data-kata-net
 
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   # GRAFANA
-  # ─────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:10.3.0
     container_name: grafana
     environment:
-      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_USER:     admin
       GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_ALLOW_SIGN_UP:     "false"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./observability/grafana/dashboards:/etc/grafana/provisioning/dashboards
@@ -230,27 +406,5 @@ services:
       - "3001:3000"
     depends_on:
       - prometheus
-    networks:
-      - data-kata-net
-
-  # ─────────────────────────────────────────────
-  # FASTAPI (Results API)
-  # ─────────────────────────────────────────────
-  api:
-    build:
-      context: ./api
-      dockerfile: Dockerfile
-    container_name: results-api
-    depends_on:
-      output-db:
-        condition: service_healthy
-    environment:
-      OUTPUT_DB_HOST: output-db
-      OUTPUT_DB_PORT: 5432
-      OUTPUT_DB_NAME: sales_results
-      OUTPUT_DB_USER: results_user
-      OUTPUT_DB_PASSWORD: results_pass
-    ports:
-      - "8080:8080"
     networks:
       - data-kata-net

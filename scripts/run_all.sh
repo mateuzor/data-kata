@@ -1,56 +1,90 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Run all components end-to-end (local dev)
+# run_all.sh — Full stack startup for Data Kata (Scala edition)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-echo "==> Copying .env.example to .env (if not exists)"
-[ -f .env ] || cp .env.example .env
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+step()  { echo -e "\n${GREEN}══ $* ${NC}"; }
 
-echo "==> Starting infrastructure..."
-docker compose up -d source-db output-db zookeeper kafka kafka-connect soap-server marquez marquez-web prometheus grafana
+# ── 0. build fat JAR ─────────────────────────────────────────────────────────
+step "Building Scala fat JAR"
+command -v sbt &>/dev/null || error "sbt not found — install via 'brew install sbt'"
+sbt assembly
+JAR="target/scala-2.12/data-kata-assembly.jar"
+[[ -f "$JAR" ]] || error "Assembly JAR not found at $JAR"
+info "JAR built: $JAR"
 
-echo "==> Waiting for services to be healthy..."
+# ── 1. infrastructure ─────────────────────────────────────────────────────────
+step "Starting infrastructure (DB, Kafka, Zookeeper, Marquez, Grafana)"
+docker compose up -d \
+  source-db output-db \
+  zookeeper kafka kafka-connect \
+  marquez marquez-web \
+  prometheus grafana
+
+info "Waiting 30s for services to initialise…"
 sleep 30
 
-echo "==> Generating filesystem data files (Mar 3-9, 2026)..."
-pip install -q pandas pyarrow
-python sources/filesystem/generate_files.py
-
-echo "==> Starting Spark workers..."
-docker compose up -d spark-master spark-worker
-
-echo "==> Running Kafka producers (ingestion)..."
-export $(cat .env | xargs)
-python ingestion/kafka_producer_soap.py &
+# ── 2. SOAP server ────────────────────────────────────────────────────────────
+step "Starting SOAP WS-* catalog server (Scala)"
+docker compose up -d soap-server
 sleep 5
-python ingestion/kafka_producer_db.py &
-python ingestion/kafka_producer_files.py &
-wait
 
-echo "==> Submitting Spark pipelines..."
-docker exec spark-master spark-submit \
-  --master spark://spark-master:7077 \
-  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.1 \
-  /opt/spark-apps/processing/pipeline_top_sales_city.py &
+# ── 3. Generate filesystem data ───────────────────────────────────────────────
+step "Generating filesystem CSV/Parquet sales files"
+docker compose run --rm generate-files
+info "Files written to ./sources/filesystem/data"
 
-docker exec spark-master spark-submit \
-  --master spark://spark-master:7077 \
-  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.1 \
-  /opt/spark-apps/processing/pipeline_top_salesman.py &
+# ── 4. Spark cluster ──────────────────────────────────────────────────────────
+step "Starting Spark master + worker"
+docker compose up -d spark-master spark-worker
+sleep 10
 
-echo "==> Starting Results API..."
+# ── 5. Ingestion (3 sources in parallel) ─────────────────────────────────────
+step "Running ingestion producers (DB, Filesystem, SOAP)"
+docker compose up -d ingest-relational ingest-filesystem ingest-soap
+info "Waiting 15s for ingestion to complete…"
+sleep 15
+
+# ── 6. Spark pipelines ────────────────────────────────────────────────────────
+step "Submitting Spark pipelines"
+docker compose up -d spark-pipeline-city spark-pipeline-salesman
+
+# ── 7. Results API ────────────────────────────────────────────────────────────
+step "Starting Results API"
 docker compose up -d api
 
+# ── 8. Register Debezium CDC connector ───────────────────────────────────────
+step "Registering Debezium CDC connector"
+sleep 10
+curl -s -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
+  -d @ingestion/connectors/debezium-postgres.json \
+  && info "CDC connector registered" \
+  || warn "CDC registration failed (non-critical — batch ingestion already ran)"
+
+# ── done ──────────────────────────────────────────────────────────────────────
 echo ""
-echo "============================================================"
-echo " Data Kata - All systems running!"
-echo "============================================================"
-echo " Spark UI:       http://localhost:8090"
-echo " Kafka Connect:  http://localhost:8083"
-echo " Marquez API:    http://localhost:5000"
-echo " Marquez Web:    http://localhost:3000"
-echo " Prometheus:     http://localhost:9090"
-echo " Grafana:        http://localhost:3001  (admin/admin)"
-echo " Results API:    http://localhost:8080/docs"
-echo "============================================================"
+echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}  Data Kata — Scala Pipeline — All services running    ${NC}"
+echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+echo ""
+echo "  Results API      → http://localhost:8080"
+echo "    /health          → health check"
+echo "    /top-sales-city  → Pipeline A results"
+echo "    /top-salesman    → Pipeline B results"
+echo "    /metrics         → Prometheus metrics"
+echo ""
+echo "  Spark UI         → http://localhost:8090"
+echo "  Kafka Connect    → http://localhost:8083"
+echo "  Marquez Lineage  → http://localhost:3000"
+echo "  Prometheus       → http://localhost:9090"
+echo "  Grafana          → http://localhost:3001  (admin/admin)"
+echo ""
+echo "  Source DB  → localhost:5433  (sales_source / sales_user / sales_pass)"
+echo "  Output DB  → localhost:5434  (sales_results / results_user / results_pass)"
+echo ""
