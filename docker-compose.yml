@@ -11,16 +11,30 @@ volumes:
   grafana_data:
   marquez_data:
 
-# ── Shared JAR mount for all Scala-based services ─────────────────────────────
 x-jar: &jar
   volumes:
     - ./target/scala-2.12/data-kata-assembly.jar:/app/data-kata.jar
-    - ./sources/filesystem/data:/opt/spark-apps/data
+    - ./sources/filesystem/data:/opt/flink-apps/data
+
+x-flink-common: &flink-common
+  image: flink:1.18-scala_2.12-java17
+  networks:
+    - data-kata-net
+
+x-flink-env: &flink-env
+  OUTPUT_DB_URL:           jdbc:postgresql://output-db:5432/sales_results
+  OUTPUT_DB_USER:          results_user
+  OUTPUT_DB_PASSWORD:      results_pass
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  OPENLINEAGE_URL:         http://marquez:5000
+  OPENLINEAGE_NAMESPACE:   data-kata
+  DATA_START_DATE:         "2026-03-03"
+  DATA_END_DATE:           "2026-03-09"
 
 services:
 
   # ──────────────────────────────────────────────────────────────────────────
-  # SOURCE DATABASE (PostgreSQL)
+  # SOURCE DATABASE
   # ──────────────────────────────────────────────────────────────────────────
   source-db:
     image: postgres:15
@@ -43,7 +57,7 @@ services:
       retries: 5
 
   # ──────────────────────────────────────────────────────────────────────────
-  # OUTPUT DATABASE (PostgreSQL — aggregated results)
+  # OUTPUT DATABASE
   # ──────────────────────────────────────────────────────────────────────────
   output-db:
     image: postgres:15
@@ -117,11 +131,11 @@ services:
       source-db:
         condition: service_healthy
     environment:
-      BOOTSTRAP_SERVERS:     kafka:9092
-      GROUP_ID:              debezium-group
-      CONFIG_STORAGE_TOPIC:  debezium_configs
-      OFFSET_STORAGE_TOPIC:  debezium_offsets
-      STATUS_STORAGE_TOPIC:  debezium_status
+      BOOTSTRAP_SERVERS:    kafka:9092
+      GROUP_ID:             debezium-group
+      CONFIG_STORAGE_TOPIC: debezium_configs
+      OFFSET_STORAGE_TOPIC: debezium_offsets
+      STATUS_STORAGE_TOPIC: debezium_status
     ports:
       - "8083:8083"
     networks:
@@ -145,60 +159,50 @@ services:
       - data-kata-net
 
   # ──────────────────────────────────────────────────────────────────────────
-  # SPARK MASTER
+  # FLINK JOB MANAGER
   # ──────────────────────────────────────────────────────────────────────────
-  spark-master:
-    image: bitnami/spark:3.5
-    container_name: spark-master
+  flink-jobmanager:
+    <<: *flink-common
+    container_name: flink-jobmanager
+    command: jobmanager
     environment:
-      SPARK_MODE:        master
-      SPARK_MASTER_HOST: spark-master
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        rest.bind-port: 8081
     ports:
-      - "8090:8080"
-      - "7077:7077"
-    networks:
-      - data-kata-net
+      - "8081:8081"
     volumes:
-      - ./checkpoints:/opt/spark-apps/checkpoints
-      - ./sources/filesystem/data:/opt/spark-apps/data
-      - ./target/scala-2.12/data-kata-assembly.jar:/opt/spark-apps/data-kata.jar
+      - ./target/scala-2.12/data-kata-assembly.jar:/opt/flink-apps/data-kata.jar
 
   # ──────────────────────────────────────────────────────────────────────────
-  # SPARK WORKER
+  # FLINK TASK MANAGER
   # ──────────────────────────────────────────────────────────────────────────
-  spark-worker:
-    image: bitnami/spark:3.5
-    container_name: spark-worker
+  flink-taskmanager:
+    <<: *flink-common
+    container_name: flink-taskmanager
+    command: taskmanager
     depends_on:
-      - spark-master
+      - flink-jobmanager
     environment:
-      SPARK_MODE:        worker
-      SPARK_MASTER_URL:  spark://spark-master:7077
-      SPARK_WORKER_MEMORY: 2G
-      SPARK_WORKER_CORES:  2
-    networks:
-      - data-kata-net
-    volumes:
-      - ./checkpoints:/opt/spark-apps/checkpoints
-      - ./sources/filesystem/data:/opt/spark-apps/data
-      - ./target/scala-2.12/data-kata-assembly.jar:/opt/spark-apps/data-kata.jar
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
+        taskmanager.memory.process.size: 1728m
 
   # ──────────────────────────────────────────────────────────────────────────
-  # DATA GENERATION — generates filesystem CSV/Parquet files (one-shot)
+  # DATA GENERATION — generates filesystem CSV files (one-shot)
   # ──────────────────────────────────────────────────────────────────────────
   generate-files:
-    image: bitnami/spark:3.5
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: generate-files
     volumes:
-      - ./sources/filesystem/data:/opt/spark-apps/data
-      - ./target/scala-2.12/data-kata-assembly.jar:/opt/spark-apps/data-kata.jar
+      - ./target/scala-2.12/data-kata-assembly.jar:/app/data-kata.jar
+      - ./sources/filesystem/data:/opt/flink-apps/data
+    command: ["com.datakata.datagen.GenerateFiles"]
     environment:
-      FS_DATA_DIR: /opt/spark-apps/data
-    command: >
-      spark-submit
-        --master local[*]
-        --class com.datakata.datagen.GenerateFiles
-        /opt/spark-apps/data-kata.jar
+      FS_DATA_DIR: /opt/flink-apps/data
     networks:
       - data-kata-net
 
@@ -213,12 +217,12 @@ services:
     <<: *jar
     command: ["com.datakata.ingest.RelationalDBProducer"]
     environment:
-      SOURCE_DB_URL:          jdbc:postgresql://source-db:5432/sales_source
-      SOURCE_DB_USER:         sales_user
-      SOURCE_DB_PASSWORD:     sales_pass
+      SOURCE_DB_URL:           jdbc:postgresql://source-db:5432/sales_source
+      SOURCE_DB_USER:          sales_user
+      SOURCE_DB_PASSWORD:      sales_pass
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      DATA_START_DATE:        "2026-03-03"
-      DATA_END_DATE:          "2026-03-09"
+      DATA_START_DATE:         "2026-03-03"
+      DATA_END_DATE:           "2026-03-09"
     depends_on:
       source-db:
         condition: service_healthy
@@ -235,11 +239,13 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: ingest-filesystem
-    <<: *jar
+    volumes:
+      - ./target/scala-2.12/data-kata-assembly.jar:/app/data-kata.jar
+      - ./sources/filesystem/data:/opt/flink-apps/data
     command: ["com.datakata.ingest.FileSystemProducer"]
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      FS_DATA_DIR:             /opt/spark-apps/data
+      FS_DATA_DIR:             /opt/flink-apps/data
       DATA_START_DATE:         "2026-03-03"
       DATA_END_DATE:           "2026-03-09"
     depends_on:
@@ -269,63 +275,42 @@ services:
       - data-kata-net
 
   # ──────────────────────────────────────────────────────────────────────────
-  # SPARK PIPELINE A — Top Sales per City (Scala)
+  # FLINK PIPELINE A — Top Sales per City (batch)
   # ──────────────────────────────────────────────────────────────────────────
-  spark-pipeline-city:
-    image: bitnami/spark:3.5
-    container_name: spark-pipeline-city
+  flink-pipeline-city:
+    <<: *flink-common
+    container_name: flink-pipeline-city
     depends_on:
-      - spark-master
-      - spark-worker
+      - flink-jobmanager
+      - flink-taskmanager
     environment:
-      OUTPUT_DB_URL:          jdbc:postgresql://output-db:5432/sales_results
-      OUTPUT_DB_USER:         results_user
-      OUTPUT_DB_PASSWORD:     results_pass
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      OPENLINEAGE_URL:        http://marquez:5000
-      OPENLINEAGE_NAMESPACE:  data-kata
-      DATA_START_DATE:        "2026-03-03"
-      DATA_END_DATE:          "2026-03-09"
+      <<: *flink-env
     command: >
-      spark-submit
-        --master spark://spark-master:7077
-        --class com.datakata.jobs.TopSalesCityJob
-        --conf spark.driver.extraJavaOptions="-Dlogback.configurationFile=/opt/spark-apps/data-kata.jar!/logback.xml"
-        /opt/spark-apps/data-kata.jar
+      flink run
+        -m flink-jobmanager:8081
+        -c com.datakata.jobs.TopSalesCityJob
+        /opt/flink-apps/data-kata.jar
     volumes:
-      - ./checkpoints:/opt/spark-apps/checkpoints
-      - ./target/scala-2.12/data-kata-assembly.jar:/opt/spark-apps/data-kata.jar
-    networks:
-      - data-kata-net
+      - ./target/scala-2.12/data-kata-assembly.jar:/opt/flink-apps/data-kata.jar
 
   # ──────────────────────────────────────────────────────────────────────────
-  # SPARK PIPELINE B — Top Salesman (Scala)
+  # FLINK PIPELINE B — Top Salesman (batch)
   # ──────────────────────────────────────────────────────────────────────────
-  spark-pipeline-salesman:
-    image: bitnami/spark:3.5
-    container_name: spark-pipeline-salesman
+  flink-pipeline-salesman:
+    <<: *flink-common
+    container_name: flink-pipeline-salesman
     depends_on:
-      - spark-master
-      - spark-worker
+      - flink-jobmanager
+      - flink-taskmanager
     environment:
-      OUTPUT_DB_URL:          jdbc:postgresql://output-db:5432/sales_results
-      OUTPUT_DB_USER:         results_user
-      OUTPUT_DB_PASSWORD:     results_pass
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      OPENLINEAGE_URL:        http://marquez:5000
-      OPENLINEAGE_NAMESPACE:  data-kata
-      DATA_START_DATE:        "2026-03-03"
-      DATA_END_DATE:          "2026-03-09"
+      <<: *flink-env
     command: >
-      spark-submit
-        --master spark://spark-master:7077
-        --class com.datakata.jobs.TopSalesmanJob
-        /opt/spark-apps/data-kata.jar
+      flink run
+        -m flink-jobmanager:8081
+        -c com.datakata.jobs.TopSalesmanJob
+        /opt/flink-apps/data-kata.jar
     volumes:
-      - ./checkpoints:/opt/spark-apps/checkpoints
-      - ./target/scala-2.12/data-kata-assembly.jar:/opt/spark-apps/data-kata.jar
-    networks:
-      - data-kata-net
+      - ./target/scala-2.12/data-kata-assembly.jar:/opt/flink-apps/data-kata.jar
 
   # ──────────────────────────────────────────────────────────────────────────
   # RESULTS API (Scala)

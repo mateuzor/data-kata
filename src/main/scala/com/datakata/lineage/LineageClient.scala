@@ -11,9 +11,9 @@ import java.time.Instant
  * Posts START / COMPLETE / FAIL events to the Marquez API.
  * Failures are logged as warnings so the pipeline never dies due to lineage issues.
  */
-class LineageClient(config: AppConfig) {
+class LineageClient(config: AppConfig) extends Serializable {
 
-  private val log = LoggerFactory.getLogger(getClass)
+  @transient private lazy val log = LoggerFactory.getLogger(getClass)
 
   def emitStart(runId: String, jobName: String,
                 inputs: Seq[String], outputs: Seq[String]): Unit =

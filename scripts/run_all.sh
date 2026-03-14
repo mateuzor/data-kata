@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# run_all.sh — Full stack startup for Data Kata (Scala edition)
+# run_all.sh — Full stack startup for Data Kata (Scala + Flink batch edition)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -35,14 +35,15 @@ docker compose up -d soap-server
 sleep 5
 
 # ── 3. Generate filesystem data ───────────────────────────────────────────────
-step "Generating filesystem CSV/Parquet sales files"
+step "Generating filesystem CSV sales files"
 docker compose run --rm generate-files
 info "Files written to ./sources/filesystem/data"
 
-# ── 4. Spark cluster ──────────────────────────────────────────────────────────
-step "Starting Spark master + worker"
-docker compose up -d spark-master spark-worker
-sleep 10
+# ── 4. Flink cluster ──────────────────────────────────────────────────────────
+step "Starting Flink JobManager + TaskManager"
+docker compose up -d flink-jobmanager flink-taskmanager
+info "Waiting 15s for Flink cluster to be ready…"
+sleep 15
 
 # ── 5. Ingestion (3 sources in parallel) ─────────────────────────────────────
 step "Running ingestion producers (DB, Filesystem, SOAP)"
@@ -50,9 +51,9 @@ docker compose up -d ingest-relational ingest-filesystem ingest-soap
 info "Waiting 15s for ingestion to complete…"
 sleep 15
 
-# ── 6. Spark pipelines ────────────────────────────────────────────────────────
-step "Submitting Spark pipelines"
-docker compose up -d spark-pipeline-city spark-pipeline-salesman
+# ── 6. Flink batch pipelines ──────────────────────────────────────────────────
+step "Submitting Flink batch jobs"
+docker compose up -d flink-pipeline-city flink-pipeline-salesman
 
 # ── 7. Results API ────────────────────────────────────────────────────────────
 step "Starting Results API"
@@ -70,7 +71,7 @@ curl -s -X POST http://localhost:8083/connectors \
 # ── done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  Data Kata — Scala Pipeline — All services running    ${NC}"
+echo -e "${GREEN}  Data Kata — Scala + Flink Batch — All services up    ${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
 echo ""
 echo "  Results API      → http://localhost:8080"
@@ -79,7 +80,7 @@ echo "    /top-sales-city  → Pipeline A results"
 echo "    /top-salesman    → Pipeline B results"
 echo "    /metrics         → Prometheus metrics"
 echo ""
-echo "  Spark UI         → http://localhost:8090"
+echo "  Flink UI         → http://localhost:8081"
 echo "  Kafka Connect    → http://localhost:8083"
 echo "  Marquez Lineage  → http://localhost:3000"
 echo "  Prometheus       → http://localhost:9090"

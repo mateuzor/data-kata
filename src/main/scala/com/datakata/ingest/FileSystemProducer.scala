@@ -34,19 +34,14 @@ object FileSystemProducer {
 
     var date = start
     while (!date.isAfter(end)) {
-      val csvDir = new File(s"${config.fsDataDir}/csv/sales_$date")
-      val csvFiles = Option(csvDir.listFiles())
-        .map(_.filter(f => f.getName.startsWith("part-") && f.getName.endsWith(".csv")))
-        .getOrElse(Array.empty[File])
+      val file = new File(s"${config.fsDataDir}/sales_$date.csv")
 
-      if (csvFiles.isEmpty) {
-        log.warn(s"No CSV found for $date in ${csvDir.getAbsolutePath}")
+      if (!file.exists()) {
+        log.warn(s"No CSV found for $date at ${file.getAbsolutePath}")
       } else {
-        csvFiles.foreach { file =>
-          val count = processFile(file, date.toString, producer)
-          totalCount += count
-          log.info(s"$date: published $count rows from ${file.getName}")
-        }
+        val count = processFile(file, date.toString, producer)
+        totalCount += count
+        log.info(s"$date: published $count rows")
       }
       date = date.plusDays(1)
     }
