@@ -2,7 +2,7 @@
 
 > Presented at **Data Kata · 23 Mar 2026**
 
-A fully containerized modern data pipeline demonstrating ingestion from 3 heterogeneous sources, stream processing with PySpark, data lineage with OpenLineage/Marquez, and observability with OpenTelemetry + Prometheus + Grafana.
+A fully containerized modern data pipeline demonstrating ingestion from 3 heterogeneous sources, batch processing with Apache Flink, data lineage with OpenLineage/Marquez, and observability with Prometheus + Grafana.
 
 ---
 
@@ -14,14 +14,14 @@ Build a **Modern Data Pipeline** that satisfies:
 
 | # | Requirement | Solution |
 |---|---|---|
-| 1 | Ingestion from 3 data sources: Relational DB, File System, WS-* | PostgreSQL (CDC), CSV/Parquet, SOAP WS |
-| 2 | Modern stream processing | Apache Spark 3.5 (PySpark Structured Streaming) |
+| 1 | Ingestion from 3 data sources: Relational DB, File System, WS-* | PostgreSQL (CDC), CSV, SOAP WS |
+| 2 | Modern batch processing | Apache Flink 1.18 (batch mode) |
 | 3 | Data Lineage | OpenLineage + Marquez |
-| 4 | Observability | OpenTelemetry + Prometheus + Grafana |
-| 5a | Pipeline: Top Sales per City | `pipeline_top_sales_city.py` |
-| 5b | Pipeline: Top Salesman in the Country | `pipeline_top_salesman.py` |
-| 6 | Aggregated results in a dedicated DB + API | PostgreSQL (output) + FastAPI |
-| 7 | Restrictions: **Python only**, no RedShift, no Hadoop | 100% Python, Spark replaces Hadoop, PostgreSQL replaces Redshift |
+| 4 | Observability | Prometheus + Grafana |
+| 5a | Pipeline: Top Sales per City | `TopSalesCityJob` |
+| 5b | Pipeline: Top Salesman in the Country | `TopSalesmanJob` |
+| 6 | Aggregated results in a dedicated DB + API | PostgreSQL (output) + Scala HTTP API |
+| 7 | Restrictions: no Python, no RedShift, no Hadoop | 100% Scala, Flink replaces Hadoop, PostgreSQL replaces Redshift |
 
 **Dataset:** 7 days of sales data across 20 salesmen and 19 Brazilian cities
 
@@ -32,33 +32,33 @@ Build a **Modern Data Pipeline** that satisfies:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        DATA SOURCES                             │
-│   PostgreSQL (CDC)     CSV / Parquet        SOAP WS-*           │
+│   PostgreSQL (CDC)     CSV (filesystem)     SOAP WS-*           │
 │   sales + salesmen     daily exports        product catalog      │
 └──────────┬──────────────────┬───────────────────┬───────────────┘
            │                  │                   │
 ┌──────────▼──────────────────▼───────────────────▼───────────────┐
 │                      INGESTION LAYER                            │
-│   Debezium (CDC)      Python File Reader    zeep SOAP Client    │
+│   Debezium (CDC)    Scala File Producer    Scala SOAP Client    │
 │                  └──────────────┴───────────────┘               │
 │                          Apache Kafka                           │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────────┐
-│                  PROCESSING LAYER — PySpark                     │
-│   Pipeline A: Top Sales per City                                │
-│   Pipeline B: Top Salesman in the Country                       │
+│              PROCESSING LAYER — Apache Flink 1.18               │
+│   Pipeline A: Top Sales per City    (batch)                     │
+│   Pipeline B: Top Salesman in the Country    (batch)            │
 │                    OpenLineage → Marquez                        │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────────┐
 │                       OUTPUT LAYER                              │
-│   PostgreSQL (aggregated results)   FastAPI REST API            │
+│   PostgreSQL (aggregated results)   Scala REST API              │
 │   GET /top-sales-city               GET /top-salesman           │
 └─────────────────────────────────────────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────────┐
 │               OBSERVABILITY & LINEAGE                           │
-│        Prometheus · Grafana · OpenTelemetry · Marquez           │
+│              Prometheus · Grafana · Marquez                     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -68,18 +68,19 @@ Build a **Modern Data Pipeline** that satisfies:
 
 | Layer | Technology |
 |---|---|
-| Language | Python 3.11 |
-| Streaming | Apache Kafka 3.6 + Kafka Connect |
+| Language | Scala 2.12 |
+| Messaging | Apache Kafka 3.6 + Kafka Connect |
 | CDC | Debezium 2.6 (PostgreSQL) |
-| Processing | Apache Spark 3.5 (PySpark Structured Streaming) |
-| WS-* Source | spyne (server) + zeep (client) |
+| Processing | Apache Flink 1.18 (DataStream API, batch mode) |
+| WS-* Source | Scala SOAP server + client (Java HttpServer + scala-xml) |
 | Data Lineage | OpenLineage + Marquez |
-| Observability | OpenTelemetry + Prometheus + Grafana |
+| Observability | Prometheus + Grafana |
 | Source DB | PostgreSQL 15 |
 | Output DB | PostgreSQL 15 |
-| API | FastAPI + uvicorn |
+| API | Scala HTTP API (Java HttpServer + Prometheus Java client) |
+| Build | SBT + sbt-assembly (fat JAR) |
 | Infra | Docker Compose |
-| ❌ Not used | ~~RedShift~~, ~~Hadoop~~ |
+| ❌ Not used | ~~Python~~, ~~RedShift~~, ~~Hadoop~~ |
 
 ---
 
@@ -88,7 +89,7 @@ Build a **Modern Data Pipeline** that satisfies:
 | # | Type | Description | Kafka Topic |
 |---|---|---|---|
 | 1 | **Relational DB** | PostgreSQL — sales transactions + salesmen (CDC via Debezium) | `sales.relational` |
-| 2 | **File System** | Daily CSV/Parquet exports — additional sales channel | `sales.filesystem` |
+| 2 | **File System** | Daily CSV exports — additional sales channel | `sales.filesystem` |
 | 3 | **WS-\*** | SOAP service — product catalog and salesman registry | `catalog.products`, `catalog.salesmen` |
 
 ---
@@ -96,7 +97,7 @@ Build a **Modern Data Pipeline** that satisfies:
 ## Pipelines
 
 ### Pipeline A — Top Sales per City
-Aggregates total sales amount per city across all sources, ranked nationally.
+Reads all Kafka sales messages (bounded batch), aggregates total sales per city, ranks nationally and writes to PostgreSQL.
 
 **Result table:** `top_sales_per_city`
 
@@ -111,7 +112,7 @@ Aggregates total sales amount per city across all sources, ranked nationally.
 ```
 
 ### Pipeline B — Top Salesman in the Country
-Joins sales data with the salesman catalog (from SOAP WS), aggregates total sales per salesman, ranked nationally.
+Loads salesman catalog from `catalog.salesmen`, then processes sales in batch mode, enriches with catalog data, aggregates and ranks nationally.
 
 **Result table:** `top_salesman`
 
@@ -133,38 +134,32 @@ Joins sales data with the salesman catalog (from SOAP WS), aggregates total sale
 
 ```
 data-kata/
+├── build.sbt                             # SBT build (Scala 2.12 + Flink 1.18)
+├── Dockerfile                            # JRE image for API, SOAP, ingestion
 ├── docker-compose.yml
-├── requirements.txt
+├── src/main/scala/com/datakata/
+│   ├── config/AppConfig.scala            # env-based configuration
+│   ├── model/Models.scala                # case classes
+│   ├── lineage/LineageClient.scala       # OpenLineage HTTP client
+│   ├── soap/SoapServer.scala             # WS-* SOAP server (Java HttpServer)
+│   ├── datagen/GenerateFiles.scala       # generates daily CSV files
+│   ├── ingest/
+│   │   ├── RelationalDBProducer.scala    # PostgreSQL → Kafka
+│   │   ├── FileSystemProducer.scala      # CSV → Kafka
+│   │   └── SoapIngestionProducer.scala   # SOAP WS → Kafka
+│   ├── jobs/
+│   │   ├── TopSalesCityJob.scala         # Flink batch — Pipeline A
+│   │   └── TopSalesmanJob.scala          # Flink batch — Pipeline B
+│   └── api/ApiServer.scala               # REST API + /metrics
 ├── sources/
-│   ├── relational/
-│   │   └── init.sql                  # schema + seed data Mar 3-9
-│   ├── filesystem/
-│   │   └── generate_files.py         # generates daily CSV/Parquet
-│   └── soap_ws/
-│       ├── soap_server.py            # spyne SOAP server
-│       └── soap_client_example.py    # zeep client example
-├── ingestion/
-│   ├── kafka_producer_db.py          # PostgreSQL → Kafka + Debezium CDC
-│   ├── kafka_producer_files.py       # CSV/Parquet → Kafka
-│   ├── kafka_producer_soap.py        # SOAP WS → Kafka
-│   └── connectors/
-│       └── debezium-postgres.json    # Debezium connector config
-├── processing/
-│   ├── pipeline_top_sales_city.py    # Pipeline A
-│   └── pipeline_top_salesman.py      # Pipeline B
-├── output_db/
-│   └── init.sql                      # results schema
-├── api/
-│   ├── main.py                       # FastAPI app
-│   ├── requirements.txt
-│   └── Dockerfile
+│   ├── relational/init.sql               # schema + seed data Mar 3-9
+│   └── soap_ws/                          # WSDL reference (generated at runtime)
+├── output_db/init.sql                    # results schema
 ├── observability/
 │   ├── prometheus.yml
 │   └── grafana/
-│       ├── datasources.yml
-│       └── dashboards/
 └── scripts/
-    └── run_all.sh                    # run everything locally
+    └── run_all.sh
 ```
 
 ---
@@ -173,25 +168,32 @@ data-kata/
 
 ### Prerequisites
 - Docker + Docker Compose
-- Python 3.11+
+- SBT (Scala Build Tool) — `brew install sbt`
 
 ### Run
 
 ```bash
-# Clone
 git clone https://github.com/mateuzor/data-kata.git
 cd data-kata
-
-# Start everything
 bash scripts/run_all.sh
 ```
+
+`run_all.sh` will:
+1. Build the fat JAR (`sbt assembly`)
+2. Start infrastructure (PostgreSQL, Kafka, Marquez, Grafana)
+3. Start the SOAP WS-* catalog server
+4. Generate CSV data files
+5. Start Flink cluster (JobManager + TaskManager)
+6. Run 3 ingestion producers in parallel
+7. Submit both Flink batch jobs
+8. Start the Results API
 
 ### Services
 
 | Service | URL |
 |---|---|
-| Results API (docs) | http://localhost:8080/docs |
-| Spark UI | http://localhost:8090 |
+| Results API | http://localhost:8080 |
+| Flink UI | http://localhost:8081 |
 | Marquez (Lineage UI) | http://localhost:3000 |
 | Grafana | http://localhost:3001 — `admin / admin` |
 | Prometheus | http://localhost:9090 |
@@ -200,31 +202,26 @@ bash scripts/run_all.sh
 ### API Endpoints
 
 ```bash
-# Top cities by sales (Mar 3-9)
-curl "http://localhost:8080/top-sales-city?limit=10"
-
-# Top salesmen nationwide (Mar 3-9)
-curl "http://localhost:8080/top-salesman?limit=10"
-
-# Pipeline run history
-curl "http://localhost:8080/pipeline-runs"
+curl http://localhost:8080/health
+curl http://localhost:8080/top-sales-city
+curl http://localhost:8080/top-salesman
+curl http://localhost:8080/pipeline-runs
+curl http://localhost:8080/metrics
 ```
 
 ---
 
 ## Data Lineage
 
-Lineage is emitted via **OpenLineage** at pipeline start and completion.
+Lineage events are emitted via **OpenLineage** at job start and completion.
 Visualize the full dataset graph at **Marquez Web UI → http://localhost:3000**
 
 ```
 kafka.sales.relational ──┐
-                          ├─► pipeline_top_sales_per_city ─► postgres.top_sales_per_city
+                          ├─► TopSalesCityJob ─► postgres.top_sales_per_city
 kafka.sales.filesystem ──┘
 
 kafka.sales.relational ──┐
-kafka.sales.filesystem ──┼─► pipeline_top_salesman ─► postgres.top_salesman
+kafka.sales.filesystem ──┼─► TopSalesmanJob ─► postgres.top_salesman
 kafka.catalog.salesmen ──┘
 ```
-
-
